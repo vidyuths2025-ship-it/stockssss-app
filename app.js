@@ -8,17 +8,10 @@
  */
 
 const ALL_SIGNALS = ["rsi_oversold_ma_cross", "golden_cross", "macd_bullish_cross"];
-const API_KEY_STORAGE = "stockssss_api_key";
 const WATCHLIST_STORAGE = "stockssss_watchlist";
 const DEFAULT_WATCHLIST = ["RELIANCE.NS", "TCS.NS", "INFY.NS", "HDFCBANK.NS"];
 
 // ---------------------------- local storage helpers ----------------------------
-function getApiKey() {
-  return localStorage.getItem(API_KEY_STORAGE) || "";
-}
-function setApiKey(key) {
-  localStorage.setItem(API_KEY_STORAGE, key);
-}
 function getWatchlist() {
   const raw = localStorage.getItem(WATCHLIST_STORAGE);
   return raw ? JSON.parse(raw) : [...DEFAULT_WATCHLIST];
@@ -37,45 +30,55 @@ function winRateColor(winRate) {
   return { bg: "#b8860b", label: "Mixed / no clear edge" };
 }
 
-// ---------------------------- Twelve Data fetch ----------------------------
+// ---------------------------- Yahoo Finance fetch (via CORS proxy) ----------------------------
 /**
- * Splits our internal 'SYMBOL.NS' / 'SYMBOL.BO' convention into Twelve
- * Data's { symbol, exchange } params. Non-Indian tickers are passed through
- * as-is (Twelve Data also covers US markets).
+ * Yahoo Finance's public chart endpoint (the same data yfinance uses) doesn't
+ * allow direct browser calls due to CORS, so we route through a free public
+ * CORS-relay service. Two are tried in sequence in case one is down/rate-limited.
+ * No API key needed — this is genuinely free, no signup, no daily limit tied to you.
  */
-function parseTicker(ticker) {
-  const m = ticker.match(/^(.*)\.(NS|BO)$/i);
-  if (!m) return { symbol: ticker, exchange: null };
-  const exchange = m[2].toUpperCase() === "NS" ? "NSE" : "BSE";
-  return { symbol: m[1], exchange };
-}
+const CORS_PROXIES = [
+  (url) => `https://corsproxy.io/?url=${encodeURIComponent(url)}`,
+  (url) => `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`,
+];
 
 async function fetchHistory(ticker) {
-  const apiKey = getApiKey();
-  if (!apiKey) throw new Error("No API key set. Open Settings and paste your free Twelve Data API key.");
+  const yahooUrl = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(
+    ticker
+  )}?range=15y&interval=1d`;
 
-  const { symbol, exchange } = parseTicker(ticker);
-  const params = new URLSearchParams({
-    symbol,
-    interval: "1day",
-    outputsize: "5000", // Twelve Data's max on the free tier — roughly ~20 years of trading days
-    apikey: apiKey,
-  });
-  if (exchange) params.set("exchange", exchange);
+  let lastError = null;
+  for (const buildProxyUrl of CORS_PROXIES) {
+    try {
+      const res = await fetch(buildProxyUrl(yahooUrl));
+      const data = await res.json();
 
-  const url = `https://api.twelvedata.com/time_series?${params.toString()}`;
-  const res = await fetch(url);
-  const data = await res.json();
+      const result = data?.chart?.result?.[0];
+      if (!result) {
+        const msg = data?.chart?.error?.description || `No data found for ${ticker}`;
+        throw new Error(msg);
+      }
 
-  if (data.status === "error" || !data.values) {
-    throw new Error(data.message || `Could not fetch data for ${ticker}`);
+      const timestamps = result.timestamp;
+      const closesRaw = result.indicators.quote[0].close;
+      if (!timestamps || !closesRaw) throw new Error(`Incomplete data for ${ticker}`);
+
+      // Filter out any null closes (Yahoo sometimes has gaps) and align dates.
+      const closes = [];
+      const dates = [];
+      for (let i = 0; i < timestamps.length; i++) {
+        if (closesRaw[i] === null || closesRaw[i] === undefined) continue;
+        closes.push(closesRaw[i]);
+        dates.push(new Date(timestamps[i] * 1000).toISOString().slice(0, 10));
+      }
+      if (closes.length < 60) throw new Error(`Not enough historical data for ${ticker}`);
+      return { closes, dates };
+    } catch (err) {
+      lastError = err;
+      // try the next proxy
+    }
   }
-
-  // Twelve Data returns newest-first; we need oldest-first for backtesting.
-  const rows = [...data.values].reverse();
-  const closes = rows.map((r) => parseFloat(r.close));
-  const dates = rows.map((r) => r.datetime);
-  return { closes, dates };
+  throw new Error(lastError?.message || `Could not fetch data for ${ticker}`);
 }
 
 // ---------------------------- rendering ----------------------------
@@ -105,19 +108,74 @@ function renderWatchlist() {
   if (list.includes(current)) select.value = current;
 }
 
-function renderSearchResults(query) {
+function debounce(fn, delay) {
+  let timer = null;
+  return (...args) => {
+    clearTimeout(timer);
+    timer = setTimeout(() => fn(...args), delay);
+  };
+}
+
+/**
+ * Live search against Yahoo Finance's public search endpoint — covers any
+ * publicly listed stock worldwide, not just the curated companies.js list.
+ * Routed through the same CORS relay as price data.
+ */
+async function searchYahoo(query) {
+  const yahooUrl = `https://query2.finance.yahoo.com/v1/finance/search?q=${encodeURIComponent(
+    query
+  )}&quotesCount=10&newsCount=0`;
+
+  for (const buildProxyUrl of CORS_PROXIES) {
+    try {
+      const res = await fetch(buildProxyUrl(yahooUrl));
+      const data = await res.json();
+      const quotes = data?.quotes || [];
+      return quotes
+        .filter((q) => q.quoteType === "EQUITY" && q.symbol)
+        .map((q) => ({
+          symbol: q.symbol,
+          name: q.shortname || q.longname || q.symbol,
+          exchange: q.exchange,
+        }));
+    } catch (err) {
+      // try next proxy
+    }
+  }
+  return null; // signals total failure so caller can fall back to the local list
+}
+
+async function renderSearchResults(query) {
   const el = document.getElementById("search-results");
-  el.innerHTML = "";
-  if (!query) return;
-
-  const q = query.toLowerCase();
-  const matches = COMPANIES.filter(
-    (c) => c.name.toLowerCase().includes(q) || c.symbol.toLowerCase().includes(q)
-  ).slice(0, 10);
-
-  if (!matches.length) {
-    el.innerHTML = `<div class="no-match">No match in the built-in list. Add the exact ticker manually below.</div>`;
+  if (!query) {
+    el.innerHTML = "";
     return;
+  }
+
+  el.innerHTML = `<div class="no-match">Searching...</div>`;
+
+  let matches = await searchYahoo(query);
+  let usedFallback = false;
+
+  if (matches === null) {
+    // live search failed entirely — fall back to the curated local list
+    usedFallback = true;
+    const q = query.toLowerCase();
+    matches = COMPANIES.filter(
+      (c) => c.name.toLowerCase().includes(q) || c.symbol.toLowerCase().includes(q)
+    ).slice(0, 10);
+  }
+
+  el.innerHTML = "";
+  if (!matches.length) {
+    el.innerHTML = `<div class="no-match">No match found. Add the exact ticker manually below.</div>`;
+    return;
+  }
+  if (usedFallback) {
+    const notice = document.createElement("div");
+    notice.className = "no-match";
+    notice.textContent = "Live search unavailable right now — showing curated list only.";
+    el.appendChild(notice);
   }
 
   const watchlist = getWatchlist();
@@ -126,7 +184,7 @@ function renderSearchResults(query) {
     const row = document.createElement("div");
     row.className = "search-row";
     row.innerHTML = `
-      <div class="search-info"><strong>${c.name}</strong><br><span class="gray">${c.symbol}</span></div>
+      <div class="search-info"><strong>${c.name}</strong><br><span class="gray">${c.symbol}${c.exchange ? " · " + c.exchange : ""}</span></div>
       <button class="add-btn" ${already ? "disabled" : ""}>${already ? "✓" : "＋"}</button>
     `;
     row.querySelector(".add-btn").addEventListener("click", () => {
@@ -141,6 +199,8 @@ function renderSearchResults(query) {
     el.appendChild(row);
   });
 }
+
+const debouncedSearch = debounce(renderSearchResults, 400);
 
 function renderSignalCard(result, ticker, holdDays) {
   const card = document.createElement("div");
@@ -159,6 +219,15 @@ function renderSignalCard(result, ticker, holdDays) {
     ? `<span class="triggered-badge">🔶 TRIGGERED NOW</span>`
     : "";
 
+  // Expected value: a weighted average of what actually happened historically —
+  // (win rate × avg gain) + (loss rate × avg loss). This is a real statistic
+  // about the past, not a forecast of what will happen next time.
+  const winFrac = result.winRate / 100;
+  const gain = result.avgGainPct ?? 0;
+  const loss = result.avgLossPct ?? 0;
+  const expectedValue = Math.round((winFrac * gain + (1 - winFrac) * loss) * 100) / 100;
+  const evColor = expectedValue >= 0 ? "#2e9e4f" : "#e05252";
+
   card.innerHTML = `
     <div class="card-header">
       <h3>${SIGNAL_LABELS[result.signal]}</h3>
@@ -167,6 +236,13 @@ function renderSignalCard(result, ticker, holdDays) {
     <div class="win-rate-box" style="background-color:${bg}">
       <div class="win-rate-number">${result.winRate}%</div>
       <div class="win-rate-sub">${label} — higher after ${holdDays} days,<br>in ${result.occurrences} historical occurrences</div>
+    </div>
+    <div class="stat-row" style="font-size:14px;">
+      <strong>Historical avg outcome per trade:</strong>
+      <span style="color:${evColor}; font-weight:bold;"> ${expectedValue >= 0 ? "+" : ""}${expectedValue}%</span>
+    </div>
+    <div class="muted small" style="margin-bottom:8px;">
+      (win rate × avg gain, blended with loss rate × avg loss — a backtested average, not a forecast)
     </div>
     <div class="stat-row"><strong>Avg gain:</strong> ${result.avgGainPct ?? "—"}%</div>
     <div class="stat-row"><strong>Avg loss:</strong> ${result.avgLossPct ?? "—"}%</div>
@@ -233,18 +309,8 @@ async function selectStock(ticker) {
 
 // ---------------------------- wiring ----------------------------
 document.addEventListener("DOMContentLoaded", () => {
-  document.getElementById("api-key-input").value = getApiKey();
-
-  document.getElementById("save-api-key").addEventListener("click", () => {
-    setApiKey(document.getElementById("api-key-input").value.trim());
-    document.getElementById("settings-panel").classList.add("hidden");
-  });
-  document.getElementById("settings-toggle").addEventListener("click", () => {
-    document.getElementById("settings-panel").classList.toggle("hidden");
-  });
-
   document.getElementById("search-box").addEventListener("input", (e) => {
-    renderSearchResults(e.target.value.trim());
+    debouncedSearch(e.target.value.trim());
   });
 
   document.getElementById("add-exact-ticker").addEventListener("click", () => {
