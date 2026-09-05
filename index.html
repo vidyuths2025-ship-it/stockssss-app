@@ -1,0 +1,96 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Stockssss App</title>
+  <link rel="stylesheet" href="style.css" />
+  <link rel="manifest" href="manifest.json" />
+  <meta name="theme-color" content="#0e1117" />
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
+</head>
+<body>
+  <header>
+    <h1>📈 Stockssss App</h1>
+  </header>
+
+  <div class="layout">
+    <aside class="sidebar">
+      <div style="display:flex; justify-content:space-between; align-items:center;">
+        <h2>📋 Watchlist</h2>
+        <button id="settings-toggle" style="background:#3a3b45;">⚙ Settings</button>
+      </div>
+
+      <div id="settings-panel" class="settings-panel hidden">
+        <p>
+          This app fetches data directly from Twelve Data (free tier).
+          Get a free API key at
+          <a href="https://twelvedata.com/pricing" target="_blank" style="color:#7fb3ff;">twelvedata.com</a>
+          — no credit card needed — and paste it below.
+        </p>
+        <input type="password" id="api-key-input" placeholder="Your Twelve Data API key" />
+        <button id="save-api-key">Save key</button>
+      </div>
+
+      <input type="text" id="search-box" placeholder="Search stocks by name or symbol" />
+      <div id="search-results"></div>
+
+      <hr class="divider" />
+
+      <details>
+        <summary style="cursor:pointer; font-size:14px; margin-bottom:8px;">Add an exact ticker instead</summary>
+        <input type="text" id="exact-ticker-input" placeholder="e.g. RELIANCE.NS, TCS.NS" />
+        <button id="add-exact-ticker" style="width:100%;">Add ticker</button>
+      </details>
+
+      <hr class="divider" />
+
+      <div id="watchlist-items"></div>
+
+      <hr class="divider" />
+
+      <label style="font-size:13px;">Hold period (trading days)</label>
+      <select id="hold-days">
+        <option value="5">5</option>
+        <option value="10">10</option>
+        <option value="20" selected>20</option>
+        <option value="40">40</option>
+        <option value="60">60</option>
+        <option value="120">120</option>
+      </select>
+
+      <hr class="divider" />
+      <p class="caption">
+        ⚠️ Every number in this app is a backtested historical statistic.
+        Nothing here is a prediction, recommendation, or guarantee.
+      </p>
+    </aside>
+
+    <main>
+      <select id="stock-select" style="max-width:300px;"></select>
+      <div id="current-price"></div>
+      <div id="status"></div>
+
+      <canvas id="price-chart"></canvas>
+
+      <p class="legend">
+        🟢 <strong>60%+</strong> historically favorable &nbsp;&nbsp;
+        🟡 <strong>40–60%</strong> mixed, no clear edge &nbsp;&nbsp;
+        🔴 <strong>under 40%</strong> historically unfavorable
+      </p>
+
+      <div id="signal-cards" class="cards-row"></div>
+
+      <footer class="disclaimer">
+        This app surfaces historical statistics, not predictions. No signal here should
+        be read as financial advice or a guarantee of future performance.
+      </footer>
+    </main>
+  </div>
+
+  <script src="companies.js"></script>
+  <script src="indicators.js"></script>
+  <script src="backtest.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
