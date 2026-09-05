@@ -40,6 +40,7 @@ function winRateColor(winRate) {
 const CORS_PROXIES = [
   (url) => `https://corsproxy.io/?url=${encodeURIComponent(url)}`,
   (url) => `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`,
+  (url) => `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(url)}`,
 ];
 
 async function fetchHistory(ticker) {
@@ -47,23 +48,31 @@ async function fetchHistory(ticker) {
     ticker
   )}?range=15y&interval=1d`;
 
-  let lastError = null;
+  const errors = [];
   for (const buildProxyUrl of CORS_PROXIES) {
+    const proxyUrl = buildProxyUrl(yahooUrl);
     try {
-      const res = await fetch(buildProxyUrl(yahooUrl));
+      const res = await fetch(proxyUrl);
+      if (!res.ok) {
+        errors.push(`${new URL(proxyUrl).hostname}: HTTP ${res.status}`);
+        continue;
+      }
       const data = await res.json();
 
       const result = data?.chart?.result?.[0];
       if (!result) {
-        const msg = data?.chart?.error?.description || `No data found for ${ticker}`;
-        throw new Error(msg);
+        const msg = data?.chart?.error?.description || "no data in response";
+        errors.push(`${new URL(proxyUrl).hostname}: ${msg}`);
+        continue;
       }
 
       const timestamps = result.timestamp;
       const closesRaw = result.indicators.quote[0].close;
-      if (!timestamps || !closesRaw) throw new Error(`Incomplete data for ${ticker}`);
+      if (!timestamps || !closesRaw) {
+        errors.push(`${new URL(proxyUrl).hostname}: incomplete data`);
+        continue;
+      }
 
-      // Filter out any null closes (Yahoo sometimes has gaps) and align dates.
       const closes = [];
       const dates = [];
       for (let i = 0; i < timestamps.length; i++) {
@@ -71,14 +80,16 @@ async function fetchHistory(ticker) {
         closes.push(closesRaw[i]);
         dates.push(new Date(timestamps[i] * 1000).toISOString().slice(0, 10));
       }
-      if (closes.length < 60) throw new Error(`Not enough historical data for ${ticker}`);
+      if (closes.length < 60) {
+        errors.push(`${new URL(proxyUrl).hostname}: not enough data points (${closes.length})`);
+        continue;
+      }
       return { closes, dates };
     } catch (err) {
-      lastError = err;
-      // try the next proxy
+      errors.push(`${new URL(proxyUrl).hostname}: ${err.message}`);
     }
   }
-  throw new Error(lastError?.message || `Could not fetch data for ${ticker}`);
+  throw new Error(`All data sources failed — ${errors.join(" | ")}`);
 }
 
 // ---------------------------- rendering ----------------------------
